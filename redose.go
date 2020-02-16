@@ -538,7 +538,10 @@ func (h *Server) Scan(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	pattern, _ := getParam(cmd.Args, "match")
-	pattern = h.sessionKey(conn, pattern) + "*"
+	if pattern == "" {
+		pattern = "*"
+	}
+	pattern = h.sessionKey(conn, pattern)
 
 	count, ok, err := getParamInt64(cmd.Args, "count")
 	if err != nil {
