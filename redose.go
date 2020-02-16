@@ -1,8 +1,8 @@
 package redose
 
 import (
-	"crypto/subtle"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -22,6 +22,7 @@ type Server struct {
 	Addr        string
 	TLSConfig   *tls.Config
 	EnableAuth  bool
+	AuthService *Auth
 	RedisClient *redis.Client
 
 	mux redcon.Handler
@@ -180,18 +181,13 @@ func (h *Server) Auth(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	hpass, err := h.RedisClient.Get("_auth:" + userPass[0]).Bytes()
-	if err == redis.Nil {
+	err := h.AuthService.Validate(userPass[0], userPass[1])
+	if errors.Is(err, ErrInvalidCredentials) {
 		h.errorString(conn, "invalid password")
 		return
 	}
 	if err != nil {
 		h.error(conn, err)
-		return
-	}
-
-	if subtle.ConstantTimeCompare(hpass, []byte(userPass[1])) != 1 {
-		h.errorString(conn, "invalid password")
 		return
 	}
 

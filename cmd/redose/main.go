@@ -1,12 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/go-redis/redis/v7"
+	_ "github.com/lib/pq"
 
 	"github.com/moonrhythm/redose"
 )
@@ -20,6 +22,7 @@ var (
 	redisPass     = flag.String("redis-pass", "", "redis password")
 	redisPoolSize = flag.Int("redis-pool-size", 0, "redis pool size")
 	auth          = flag.Bool("auth", false, "enable auth")
+	authURI       = flag.String("auth-uri", "", "auth sql uri")
 )
 
 func main() {
@@ -31,8 +34,9 @@ func main() {
 	if *redisAddr == "" {
 		log.Fatalf("redis-addr required")
 	}
-
-	log.Printf("redose server starting at %s", addr)
+	if *auth && *authURI == "" {
+		log.Fatalf("auth uri required")
+	}
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:         *redisAddr,
@@ -49,6 +53,22 @@ func main() {
 		RedisClient: redisClient,
 		EnableAuth:  *auth,
 	}
+
+	if *auth {
+		sqlDB, err := sql.Open("postgres", *authURI)
+		if err != nil {
+			log.Fatalf("can not open sql database; %v", err)
+			return
+		}
+		sqlDB.SetConnMaxLifetime(time.Minute)
+		defer sqlDB.Close()
+
+		srv.AuthService = &redose.Auth{
+			DB: sqlDB,
+		}
+	}
+
+	log.Printf("redose server starting at %s", addr)
 
 	var err error
 	if enableTLS {
