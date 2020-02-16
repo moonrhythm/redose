@@ -1,6 +1,7 @@
 package redose
 
 import (
+	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -8,20 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-redis/redis/v7"
 	"github.com/tidwall/redcon"
-	"golang.org/x/crypto/bcrypt"
 )
-
-type Storage interface {
-	ClearExp() error
-	Set(key string, value []byte, exp time.Duration) error
-	Get(key string) ([]byte, error)
-	Del(key string) (bool, error)
-	SetExp(key string, exp time.Duration) (bool, error)
-	Exp(key string) (time.Duration, bool, error)
-	Keys(pattern string) ([]string, error)
-	Scan(cursor int, pattern string, count int) (int, []string, error)
-}
 
 type session struct {
 	User string
@@ -29,10 +19,10 @@ type session struct {
 
 // Server is the redose server
 type Server struct {
-	Addr       string
-	TLSConfig  *tls.Config
-	EnableAuth bool
-	Store      Storage
+	Addr        string
+	TLSConfig   *tls.Config
+	EnableAuth  bool
+	RedisClient *redis.Client
 
 	mux redcon.Handler
 }
@@ -56,7 +46,6 @@ func (h *Server) init() {
 	mux.HandleFunc("pexpire", h.PExpire)
 	mux.HandleFunc("ttl", h.TTL)
 	mux.HandleFunc("pttl", h.PTTL)
-	mux.HandleFunc("keys", h.Keys)
 	mux.HandleFunc("scan", h.Scan)
 }
 
@@ -121,6 +110,21 @@ func (h *Server) sessionKeyLen(conn redcon.Conn) int {
 	return len(h.sessionKey(conn, ""))
 }
 
+func (h *Server) setSessionKey(conn redcon.Conn, cmd redcon.Command, index int) {
+	if len(cmd.Args) < index {
+		return
+	}
+	cmd.Args[index] = []byte(h.sessionKey(conn, string(cmd.Args[index])))
+}
+
+func (h *Server) convertCmd(cmd redcon.Command) []interface{} {
+	v := make([]interface{}, len(cmd.Args))
+	for i := range v {
+		v[i] = string(cmd.Args[i])
+	}
+	return v
+}
+
 func (h *Server) checkAuth(conn redcon.Conn) bool {
 	if !h.EnableAuth {
 		return true
@@ -176,14 +180,17 @@ func (h *Server) Auth(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	hpass, err := h.Store.Get("_auth:" + userPass[0])
+	hpass, err := h.RedisClient.Get("_auth:" + userPass[0]).Bytes()
+	if err == redis.Nil {
+		h.errorString(conn, "invalid password")
+		return
+	}
 	if err != nil {
 		h.error(conn, err)
 		return
 	}
 
-	err = bcrypt.CompareHashAndPassword(hpass, []byte(userPass[1]))
-	if err != nil {
+	if subtle.ConstantTimeCompare(hpass, []byte(userPass[1])) != 1 {
 		h.errorString(conn, "invalid password")
 		return
 	}
@@ -278,19 +285,22 @@ func (h *Server) Set(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	if len(cmd.Args) != 3 {
+	// SET key value [EX seconds|PX milliseconds] [NX|XX] [KEEPTTL]
+	if len(cmd.Args) < 3 {
 		h.wrongNumberArgs(conn, cmd)
 		return
 	}
 
-	key := h.sessionKey(conn, string(cmd.Args[1]))
+	h.setSessionKey(conn, cmd, 1)
+	c := redis.NewStringCmd(h.convertCmd(cmd)...)
+	h.RedisClient.Process(c)
 
-	err := h.Store.Set(key, cmd.Args[2], 0)
+	val, err := c.Result()
 	if err != nil {
 		h.error(conn, err)
 		return
 	}
-	conn.WriteString("OK")
+	conn.WriteString(val)
 }
 
 func (h *Server) Get(conn redcon.Conn, cmd redcon.Command) {
@@ -304,19 +314,16 @@ func (h *Server) Get(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
-
-	val, err := h.Store.Get(key)
+	val, err := h.RedisClient.Get(key).Result()
+	if err == redis.Nil {
+		conn.WriteNull()
+		return
+	}
 	if err != nil {
 		h.error(conn, err)
 		return
 	}
-
-	if val == nil {
-		conn.WriteNull()
-		return
-	}
-
-	conn.WriteBulk(val)
+	conn.WriteBulkString(val)
 }
 
 func (h *Server) MGet(conn redcon.Conn, cmd redcon.Command) {
@@ -329,19 +336,28 @@ func (h *Server) MGet(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	conn.WriteArray(len(cmd.Args) - 1)
-
+	keys := make([]string, 0, len(cmd.Args)-1)
 	for _, key := range cmd.Args[1:] {
 		k := h.sessionKey(conn, string(key))
-		val, err := h.Store.Get(k)
-		if err != nil {
-			h.error(conn, err)
-		}
-		if val == nil {
+		keys = append(keys, k)
+	}
+
+	val, err := h.RedisClient.MGet(keys...).Result()
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
+
+	conn.WriteArray(len(cmd.Args) - 1)
+	for _, v := range val {
+		switch v := v.(type) {
+		case string:
+			conn.WriteBulkString(v)
+		case []byte:
+			conn.WriteBulk(v)
+		default:
 			conn.WriteNull()
-			return
 		}
-		conn.WriteBulk(val)
 	}
 }
 
@@ -357,18 +373,17 @@ func (h *Server) Type(conn redcon.Conn, cmd redcon.Command) {
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
-	val, err := h.Store.Get(key)
+	val, err := h.RedisClient.Type(key).Result()
+	if err == redis.Nil {
+		conn.WriteString("none")
+		return
+	}
 	if err != nil {
 		h.error(conn, err)
 		return
 	}
 
-	if val == nil {
-		conn.WriteString("none")
-		return
-	}
-
-	conn.WriteString("string")
+	conn.WriteString(val)
 }
 
 func (h *Server) Del(conn redcon.Conn, cmd redcon.Command) {
@@ -381,20 +396,18 @@ func (h *Server) Del(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	var cnt int
+	keys := make([]string, 0, len(cmd.Args)-1)
 	for _, key := range cmd.Args[1:] {
 		k := h.sessionKey(conn, string(key))
-		ok, err := h.Store.Del(k)
-		if err != nil {
-			h.error(conn, err)
-			return
-		}
-		if ok {
-			cnt++
-		}
+		keys = append(keys, k)
 	}
 
-	conn.WriteInt(cnt)
+	cnt, err := h.RedisClient.Del(keys...).Result()
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
+	conn.WriteInt64(cnt)
 }
 
 func (h *Server) Expire(conn redcon.Conn, cmd redcon.Command) {
@@ -408,6 +421,7 @@ func (h *Server) Expire(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
+
 	second, err := strconv.ParseInt(string(cmd.Args[2]), 10, 64)
 	if err != nil {
 		h.errorString(conn, "value is not an integer or out of range")
@@ -415,7 +429,7 @@ func (h *Server) Expire(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	expIn := time.Duration(second) * time.Second
-	ok, err := h.Store.SetExp(key, expIn)
+	ok, err := h.RedisClient.Expire(key, expIn).Result()
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -447,7 +461,7 @@ func (h *Server) PExpire(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	expIn := time.Duration(millisecond) * time.Millisecond
-	ok, err := h.Store.SetExp(key, expIn)
+	ok, err := h.RedisClient.PExpire(key, expIn).Result()
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -473,21 +487,15 @@ func (h *Server) TTL(conn redcon.Conn, cmd redcon.Command) {
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
-	expIn, ok, err := h.Store.Exp(key)
+	c := redis.NewIntCmd("ttl", key)
+	h.RedisClient.Process(c)
+
+	val, err := c.Result()
 	if err != nil {
 		h.error(conn, err)
 		return
 	}
-	if !ok {
-		conn.WriteInt(-2)
-		return
-	}
-	if expIn == 0 {
-		conn.WriteInt(-1)
-		return
-	}
-
-	conn.WriteInt64(int64(expIn / time.Second))
+	conn.WriteInt64(val)
 }
 
 func (h *Server) PTTL(conn redcon.Conn, cmd redcon.Command) {
@@ -502,47 +510,15 @@ func (h *Server) PTTL(conn redcon.Conn, cmd redcon.Command) {
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
-	expIn, ok, err := h.Store.Exp(key)
+	c := redis.NewIntCmd("pttl", key)
+	h.RedisClient.Process(c)
+
+	val, err := c.Result()
 	if err != nil {
 		h.error(conn, err)
 		return
 	}
-	if !ok {
-		conn.WriteInt(-2)
-		return
-	}
-	if expIn == 0 {
-		conn.WriteInt(-1)
-		return
-	}
-
-	conn.WriteInt64(int64(expIn / time.Millisecond))
-}
-
-func (h *Server) Keys(conn redcon.Conn, cmd redcon.Command) {
-	if !h.checkAuth(conn) {
-		return
-	}
-
-	if len(cmd.Args) != 2 {
-		h.wrongNumberArgs(conn, cmd)
-		return
-	}
-
-	key := h.sessionKey(conn, string(cmd.Args[1]))
-
-	keys, err := h.Store.Keys(key)
-	if err != nil {
-		h.error(conn, err)
-		return
-	}
-
-	prefix := h.sessionKeyLen(conn)
-
-	conn.WriteArray(len(keys))
-	for _, k := range keys {
-		conn.WriteBulkString(k[prefix:])
-	}
+	conn.WriteInt64(val)
 }
 
 func (h *Server) Scan(conn redcon.Conn, cmd redcon.Command) {
@@ -559,7 +535,7 @@ func (h *Server) Scan(conn redcon.Conn, cmd redcon.Command) {
 	case 6:
 	}
 
-	cursor, err := strconv.Atoi(string(cmd.Args[1]))
+	cursor, err := strconv.ParseUint(string(cmd.Args[1]), 10, 64)
 	if err != nil {
 		h.errorString(conn, "value is not an integer or out of range")
 		return
@@ -568,7 +544,7 @@ func (h *Server) Scan(conn redcon.Conn, cmd redcon.Command) {
 	pattern, _ := getParam(cmd.Args, "match")
 	pattern = h.sessionKey(conn, pattern)
 
-	count, ok, err := getParamInt(cmd.Args, "count")
+	count, ok, err := getParamInt64(cmd.Args, "count")
 	if err != nil {
 		h.errorString(conn, "value is not an integer or out of range")
 		return
@@ -577,7 +553,7 @@ func (h *Server) Scan(conn redcon.Conn, cmd redcon.Command) {
 		count = 10
 	}
 
-	cursor, keys, err := h.Store.Scan(cursor, pattern, count)
+	keys, cursor, err := h.RedisClient.Scan(cursor, pattern, count).Result()
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -586,7 +562,7 @@ func (h *Server) Scan(conn redcon.Conn, cmd redcon.Command) {
 	prefix := h.sessionKeyLen(conn)
 
 	conn.WriteArray(2)
-	conn.WriteBulkString(strconv.Itoa(cursor))
+	conn.WriteBulkString(strconv.FormatUint(cursor, 10))
 
 	conn.WriteArray(len(keys))
 	for _, k := range keys {
@@ -604,11 +580,11 @@ func getParam(args [][]byte, name string) (string, bool) {
 	return "", false
 }
 
-func getParamInt(args [][]byte, name string) (int, bool, error) {
+func getParamInt64(args [][]byte, name string) (int64, bool, error) {
 	p, ok := getParam(args, name)
 	if !ok {
 		return 0, false, nil
 	}
-	i, err := strconv.Atoi(p)
+	i, err := strconv.ParseInt(p, 10, 64)
 	return i, true, err
 }

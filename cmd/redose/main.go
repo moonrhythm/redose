@@ -1,24 +1,25 @@
 package main
 
 import (
-	"database/sql"
 	"flag"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
+	"github.com/go-redis/redis/v7"
+
 	"github.com/moonrhythm/redose"
-	"github.com/moonrhythm/redose/store"
 )
 
 // flags
 var (
-	port      = flag.Int("p", 6379, "port")
-	tlsKey    = flag.String("tls-key", "", "TLS Private Key")
-	tlsCrt    = flag.String("tls-crt", "", "TLS Certificate")
-	storeMode = flag.String("s", "mem", "storage mode")
-	auth      = flag.Bool("auth", false, "enable auth")
+	port          = flag.Int("p", 6379, "port")
+	tlsKey        = flag.String("tls-key", "", "TLS Private Key")
+	tlsCrt        = flag.String("tls-crt", "", "TLS Certificate")
+	redisAddr     = flag.String("redis-addr", "", "redis address")
+	redisPass     = flag.String("redis-pass", "", "redis password")
+	redisPoolSize = flag.Int("redis-pool-size", 0, "redis pool size")
+	auth          = flag.Bool("auth", false, "enable auth")
 )
 
 func main() {
@@ -27,46 +28,26 @@ func main() {
 	addr := fmt.Sprintf(":%d", *port)
 	enableTLS := *tlsKey != "" && *tlsCrt != ""
 
+	if *redisAddr == "" {
+		log.Fatalf("redis-addr required")
+	}
+
 	log.Printf("redose server starting at %s", addr)
 
-	// normalize store mode
-	storeArgs := strings.SplitN(*storeMode, ",", 2)
-	if len(storeArgs) == 0 {
-		storeArgs = []string{""}
-	}
-
-	var s redose.Storage
-	switch storeArgs[0] {
-	default:
-		log.Fatalf("invalid store mode")
-	case "mem":
-		s = store.NewMemory()
-	case "crdb":
-		db, err := sql.Open("postgres", storeArgs[1])
-		if err != nil {
-			log.Fatalf("can not open crdb; %v", err)
-		}
-		db.SetMaxIdleConns(200)
-		db.SetConnMaxLifetime(time.Hour)
-		s = store.NewCockroachDB(db)
-	}
-
-	go func() {
-		time.Sleep(time.Minute)
-
-		for {
-			log.Printf("store: clear exp")
-			s.ClearExp()
-			time.Sleep(10 * time.Minute)
-		}
-	}()
-
-	log.Printf("using %s storage mode", storeArgs[0])
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:         *redisAddr,
+		Password:     *redisPass,
+		MaxRetries:   10,
+		DialTimeout:  time.Second,
+		PoolSize:     *redisPoolSize,
+		MinIdleConns: *redisPoolSize,
+	})
+	defer redisClient.Close()
 
 	srv := redose.Server{
-		Addr:       addr,
-		Store:      s,
-		EnableAuth: *auth,
+		Addr:        addr,
+		RedisClient: redisClient,
+		EnableAuth:  *auth,
 	}
 
 	var err error
