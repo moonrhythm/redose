@@ -1,6 +1,6 @@
 module github.com/moonrhythm/redose
 
-go 1.13
+go 1.14
 
 require (
 	github.com/go-redis/redis/v7 v7.1.0
