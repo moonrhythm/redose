@@ -39,7 +39,8 @@ func (h *Server) init() {
 	mux.HandleFunc("select", h.Select)
 	mux.HandleFunc("info", h.Info)
 	mux.HandleFunc("set", h.Set)
-	mux.HandleFunc("setex", h.SetEx)
+	mux.HandleFunc("setex", h.SetEX)
+	mux.HandleFunc("setnx", h.SetNX)
 	mux.HandleFunc("get", h.Get)
 	mux.HandleFunc("mget", h.MGet)
 	mux.HandleFunc("type", h.Type)
@@ -290,7 +291,11 @@ func (h *Server) Set(conn redcon.Conn, cmd redcon.Command) {
 
 	h.setSessionKey(conn, cmd, 1)
 	c := redis.NewStringCmd(h.convertCmd(cmd)...)
-	h.RedisClient.Process(c)
+	err := h.RedisClient.Process(c)
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
 
 	val, err := c.Result()
 	if err != nil {
@@ -300,7 +305,7 @@ func (h *Server) Set(conn redcon.Conn, cmd redcon.Command) {
 	conn.WriteString(val)
 }
 
-func (h *Server) SetEx(conn redcon.Conn, cmd redcon.Command) {
+func (h *Server) SetEX(conn redcon.Conn, cmd redcon.Command) {
 	if !h.checkAuth(conn) {
 		return
 	}
@@ -313,7 +318,38 @@ func (h *Server) SetEx(conn redcon.Conn, cmd redcon.Command) {
 
 	h.setSessionKey(conn, cmd, 1)
 	c := redis.NewStringCmd(h.convertCmd(cmd)...)
-	h.RedisClient.Process(c)
+	err := h.RedisClient.Process(c)
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
+
+	val, err := c.Result()
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
+	conn.WriteString(val)
+}
+
+func (h *Server) SetNX(conn redcon.Conn, cmd redcon.Command) {
+	if !h.checkAuth(conn) {
+		return
+	}
+
+	// SETNX key value
+	if len(cmd.Args) != 3 {
+		h.wrongNumberArgs(conn, cmd)
+		return
+	}
+
+	h.setSessionKey(conn, cmd, 1)
+	c := redis.NewStringCmd(h.convertCmd(cmd)...)
+	err := h.RedisClient.Process(c)
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
 
 	val, err := c.Result()
 	if err != nil {
@@ -508,7 +544,11 @@ func (h *Server) TTL(conn redcon.Conn, cmd redcon.Command) {
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
 	c := redis.NewIntCmd("ttl", key)
-	h.RedisClient.Process(c)
+	err := h.RedisClient.Process(c)
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
 
 	val, err := c.Result()
 	if err != nil {
@@ -531,7 +571,11 @@ func (h *Server) PTTL(conn redcon.Conn, cmd redcon.Command) {
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
 	c := redis.NewIntCmd("pttl", key)
-	h.RedisClient.Process(c)
+	err := h.RedisClient.Process(c)
+	if err != nil {
+		h.error(conn, err)
+		return
+	}
 
 	val, err := c.Result()
 	if err != nil {
