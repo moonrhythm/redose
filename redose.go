@@ -344,7 +344,7 @@ func (h *Server) SetNX(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	h.setSessionKey(conn, cmd, 1)
-	c := redis.NewStringCmd(h.convertCmd(cmd)...)
+	c := redis.NewIntCmd(h.convertCmd(cmd)...)
 	err := h.RedisClient.Process(c)
 	if err != nil {
 		h.error(conn, err)
@@ -356,7 +356,7 @@ func (h *Server) SetNX(conn redcon.Conn, cmd redcon.Command) {
 		h.error(conn, err)
 		return
 	}
-	conn.WriteString(val)
+	conn.WriteInt64(val)
 }
 
 func (h *Server) Get(conn redcon.Conn, cmd redcon.Command) {
