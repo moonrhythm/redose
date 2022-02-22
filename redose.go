@@ -1,6 +1,7 @@
 package redose
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -9,9 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 	"github.com/tidwall/redcon"
 )
+
+var bgCtx = context.Background()
 
 type session struct {
 	User string
@@ -290,8 +293,8 @@ func (h *Server) Set(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	h.setSessionKey(conn, cmd, 1)
-	c := redis.NewStringCmd(h.convertCmd(cmd)...)
-	err := h.RedisClient.Process(c)
+	c := redis.NewStringCmd(bgCtx, h.convertCmd(cmd)...)
+	err := h.RedisClient.Process(bgCtx, c)
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -317,8 +320,8 @@ func (h *Server) SetEX(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	h.setSessionKey(conn, cmd, 1)
-	c := redis.NewStringCmd(h.convertCmd(cmd)...)
-	err := h.RedisClient.Process(c)
+	c := redis.NewStringCmd(bgCtx, h.convertCmd(cmd)...)
+	err := h.RedisClient.Process(bgCtx, c)
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -344,8 +347,8 @@ func (h *Server) SetNX(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	h.setSessionKey(conn, cmd, 1)
-	c := redis.NewIntCmd(h.convertCmd(cmd)...)
-	err := h.RedisClient.Process(c)
+	c := redis.NewIntCmd(bgCtx, h.convertCmd(cmd)...)
+	err := h.RedisClient.Process(bgCtx, c)
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -370,7 +373,7 @@ func (h *Server) Get(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
-	val, err := h.RedisClient.Get(key).Result()
+	val, err := h.RedisClient.Get(bgCtx, key).Result()
 	if err == redis.Nil {
 		conn.WriteNull()
 		return
@@ -398,7 +401,7 @@ func (h *Server) MGet(conn redcon.Conn, cmd redcon.Command) {
 		keys = append(keys, k)
 	}
 
-	val, err := h.RedisClient.MGet(keys...).Result()
+	val, err := h.RedisClient.MGet(bgCtx, keys...).Result()
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -429,7 +432,7 @@ func (h *Server) Type(conn redcon.Conn, cmd redcon.Command) {
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
-	val, err := h.RedisClient.Type(key).Result()
+	val, err := h.RedisClient.Type(bgCtx, key).Result()
 	if err == redis.Nil {
 		conn.WriteString("none")
 		return
@@ -458,7 +461,7 @@ func (h *Server) Del(conn redcon.Conn, cmd redcon.Command) {
 		keys = append(keys, k)
 	}
 
-	cnt, err := h.RedisClient.Del(keys...).Result()
+	cnt, err := h.RedisClient.Del(bgCtx, keys...).Result()
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -485,7 +488,7 @@ func (h *Server) Expire(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	expIn := time.Duration(second) * time.Second
-	ok, err := h.RedisClient.Expire(key, expIn).Result()
+	ok, err := h.RedisClient.Expire(bgCtx, key, expIn).Result()
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -517,7 +520,7 @@ func (h *Server) PExpire(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	expIn := time.Duration(millisecond) * time.Millisecond
-	ok, err := h.RedisClient.PExpire(key, expIn).Result()
+	ok, err := h.RedisClient.PExpire(bgCtx, key, expIn).Result()
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -543,8 +546,8 @@ func (h *Server) TTL(conn redcon.Conn, cmd redcon.Command) {
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
-	c := redis.NewIntCmd("ttl", key)
-	err := h.RedisClient.Process(c)
+	c := redis.NewIntCmd(bgCtx, "ttl", key)
+	err := h.RedisClient.Process(bgCtx, c)
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -570,8 +573,8 @@ func (h *Server) PTTL(conn redcon.Conn, cmd redcon.Command) {
 
 	key := h.sessionKey(conn, string(cmd.Args[1]))
 
-	c := redis.NewIntCmd("pttl", key)
-	err := h.RedisClient.Process(c)
+	c := redis.NewIntCmd(bgCtx, "pttl", key)
+	err := h.RedisClient.Process(bgCtx, c)
 	if err != nil {
 		h.error(conn, err)
 		return
@@ -620,7 +623,7 @@ func (h *Server) Scan(conn redcon.Conn, cmd redcon.Command) {
 		count = 10
 	}
 
-	keys, cursor, err := h.RedisClient.Scan(cursor, pattern, count).Result()
+	keys, cursor, err := h.RedisClient.Scan(bgCtx, cursor, pattern, count).Result()
 	if err != nil {
 		h.error(conn, err)
 		return

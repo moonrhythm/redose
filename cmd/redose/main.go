@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 	_ "github.com/lib/pq"
 
 	"github.com/moonrhythm/redose"

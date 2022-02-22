@@ -1,4 +1,4 @@
-FROM golang:1.14.4-alpine as build
+FROM golang:1.17.7-alpine as build
 
 WORKDIR /src
 
@@ -7,7 +7,7 @@ RUN go mod download
 COPY . .
 RUN go build -o redose -ldflags "-w -s" ./cmd/redose/main.go
 
-FROM alpine:3.11
+FROM alpine:3.14
 
 RUN apk add --no-cache tzdata
 COPY --from=build /src/redose /usr/local/bin/redose
